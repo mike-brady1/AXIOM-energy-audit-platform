@@ -1,33 +1,17 @@
 """
 AXIOM — Step 3: Random Forest EUI Regressor
 ============================================
-Predicts climate-adjusted EUI (kWh/m²/yr) for any tertiary building,
-then derives DPE label (A→G) and Decret Tertiaire compliance from
-the predicted value.
+Predicts log1p(EUI), converts back to kWh/m²/yr via expm1,
+then derives DPE label and Décret Tertiaire compliance.
 
-Why regression, not classification:
-  DPE label = deterministic threshold applied to EUI.
-  Predicting EUI directly (regression) then applying thresholds
-  yields far higher DPE accuracy than classifying label directly.
-
-Model
------
-  RandomForestRegressor
-  - n_estimators : 200
-  - max_features : 'sqrt'
-  - min_samples_leaf : 5
-  - n_jobs : -1  (all cores)
-
-Evaluation
-----------
-  - R², MAE, RMSE on held-out 20% test set
-  - DPE label accuracy derived from predicted EUI
-  - Feature importances
+log1p transform on y compresses the right tail caused by
+high-EUI sectors (data centres, laundries), improving R²
+and reducing MAE for the typical building range.
 
 Usage:
     from src.ai_engine.classifier import train_regressor, predict_building
     result = train_regressor(X, y, meta, artifacts)
-    pred   = predict_building({...}, result, artifacts)
+    pred   = predict_building({...}, result, artifacts, sector_ref_eui=120.0)
 """
 
 from __future__ import annotations
@@ -53,32 +37,24 @@ from src.processing.preprocessor import (
 logger = logging.getLogger(__name__)
 
 
-# ───────────────────────────────────────────────────────────────────────────
-# OUTPUT CONTAINER
-# ───────────────────────────────────────────────────────────────────────────
-
 @dataclass
 class RegressorResult:
     model:                  RandomForestRegressor
     r2:                     float
-    mae:                    float          # kWh/m²/yr
-    rmse:                   float          # kWh/m²/yr
-    dpe_accuracy:           float          # % correct DPE label from predicted EUI
-    dpe_adjacent_accuracy:  float          # % within ±1 DPE band
+    mae:                    float
+    rmse:                   float
+    dpe_accuracy:           float
+    dpe_adjacent_accuracy:  float
     feature_importances:    pd.DataFrame
-    y_test:                 np.ndarray     # actual EUI
-    y_pred:                 np.ndarray     # predicted EUI
-    dpe_actual:             np.ndarray     # actual DPE labels
-    dpe_predicted:          np.ndarray     # predicted DPE labels
+    y_test:                 np.ndarray    # actual EUI (kWh/m², not log)
+    y_pred:                 np.ndarray    # predicted EUI (kWh/m², not log)
+    dpe_actual:             np.ndarray
+    dpe_predicted:          np.ndarray
 
-
-# ───────────────────────────────────────────────────────────────────────────
-# TRAINING
-# ───────────────────────────────────────────────────────────────────────────
 
 def train_regressor(
     X: np.ndarray,
-    y: np.ndarray,
+    y: np.ndarray,                        # log1p(EUI) from build_feature_matrix
     meta: pd.DataFrame,
     artifacts: PreprocessArtifacts,
     *,
@@ -88,42 +64,21 @@ def train_regressor(
     sample_size: Optional[int] = None,
 ) -> RegressorResult:
     """
-    Train Random Forest Regressor to predict EUI (kWh/m²/yr).
-
-    Parameters
-    ----------
-    X             : feature matrix from build_feature_matrix()
-    y             : EUI target vector from build_feature_matrix()
-    meta          : metadata DataFrame (contains dpe_label for evaluation)
-    artifacts     : PreprocessArtifacts
-    n_estimators  : number of trees (default 200)
-    test_size     : held-out test fraction (default 0.20)
-    random_state  : reproducibility seed
-    sample_size   : optional row subsample for faster iteration
-
-    Returns
-    -------
-    RegressorResult with trained model + full evaluation metrics
+    Train RF Regressor on log1p(EUI). Evaluates on back-transformed kWh/m².
     """
     y_dpe = meta["dpe_label"].values
 
-    # ── Optional subsample ───────────────────────────────────────────────
     if sample_size and sample_size < len(X):
         rng = np.random.default_rng(random_state)
         idx = rng.choice(len(X), size=sample_size, replace=False)
         X, y, y_dpe = X[idx], y[idx], y_dpe[idx]
         logger.info("Subsampled to %d rows", sample_size)
 
-    # ── Train / test split ───────────────────────────────────────────────
     X_tr, X_te, y_tr, y_te, dpe_tr, dpe_te = train_test_split(
-        X, y, y_dpe,
-        test_size=test_size,
-        random_state=random_state,
+        X, y, y_dpe, test_size=test_size, random_state=random_state
     )
     logger.info("Train: %d  Test: %d", len(X_tr), len(X_te))
 
-    # ── Train ─────────────────────────────────────────────────────────────
-    logger.info("Training RF regressor (%d trees)...", n_estimators)
     model = RandomForestRegressor(
         n_estimators=n_estimators,
         max_features="sqrt",
@@ -131,21 +86,22 @@ def train_regressor(
         n_jobs=-1,
         random_state=random_state,
     )
+    logger.info("Training RF regressor on log1p(EUI)...")
     model.fit(X_tr, y_tr)
 
-    # ── Evaluate EUI regression ─────────────────────────────────────────
-    y_pred = model.predict(X_te)
-    r2     = r2_score(y_te, y_pred)
-    mae    = mean_absolute_error(y_te, y_pred)
-    rmse   = np.sqrt(mean_squared_error(y_te, y_pred))
-    logger.info("EUI regression — R²=%.3f  MAE=%.1f  RMSE=%.1f kWh/m²", r2, mae, rmse)
+    # Back-transform predictions to kWh/m²
+    y_pred_log  = model.predict(X_te)
+    y_pred      = np.expm1(y_pred_log)
+    y_test      = np.expm1(y_te)
 
-    # ── Derive DPE labels from predicted EUI ──────────────────────────
-    dpe_pred_series  = assign_dpe_label(pd.Series(y_pred))
-    dpe_pred         = dpe_pred_series.values
+    r2   = r2_score(y_test, y_pred)
+    mae  = mean_absolute_error(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    logger.info("R²=%.3f  MAE=%.1f  RMSE=%.1f kWh/m²", r2, mae, rmse)
+
+    dpe_pred         = assign_dpe_label(pd.Series(y_pred)).values
     dpe_accuracy     = float((dpe_pred == dpe_te).mean())
 
-    # Adjacent accuracy: within ±1 DPE band (A↔B, B↔C, etc.)
     labels_order = ["A", "B", "C", "D", "E", "F", "G"]
     label_idx    = {l: i for i, l in enumerate(labels_order)}
     adj = np.abs(
@@ -153,9 +109,8 @@ def train_regressor(
         np.array([label_idx.get(a, 0) for a in dpe_te])
     ) <= 1
     dpe_adj_accuracy = float(adj.mean())
-    logger.info("DPE exact=%.3f  adjacent=%.3f", dpe_accuracy, dpe_adj_accuracy)
+    logger.info("DPE exact=%.3f  adj=%.3f", dpe_accuracy, dpe_adj_accuracy)
 
-    # ── Feature importances ─────────────────────────────────────────────
     fi = pd.DataFrame({
         "feature":    artifacts.feature_names,
         "importance": model.feature_importances_,
@@ -169,16 +124,12 @@ def train_regressor(
         dpe_accuracy=round(dpe_accuracy, 4),
         dpe_adjacent_accuracy=round(dpe_adj_accuracy, 4),
         feature_importances=fi,
-        y_test=y_te,
+        y_test=y_test,
         y_pred=y_pred,
         dpe_actual=dpe_te,
         dpe_predicted=dpe_pred,
     )
 
-
-# ───────────────────────────────────────────────────────────────────────────
-# INFERENCE
-# ───────────────────────────────────────────────────────────────────────────
 
 def predict_building(
     building: dict,
@@ -189,72 +140,41 @@ def predict_building(
     tertiaire_horizon: int = 2030,
 ) -> dict:
     """
-    Predict EUI, DPE label and Decret Tertiaire compliance for a single building.
-
-    Parameters
-    ----------
-    building          : dict with building attributes
-    result            : RegressorResult from train_regressor()
-    artifacts         : PreprocessArtifacts from build_feature_matrix()
-    sector_ref_eui    : reference EUI for Tertiaire gap (kWh/m²/yr)
-                        If None, predicted EUI is used as its own reference
-    tertiaire_horizon : compliance target year (2030/2040/2050)
-
-    Returns
-    -------
-    dict with:
-        predicted_eui          : float  kWh/m²/yr
-        dpe_label              : str    A–G
-        tertiaire_gap_pct      : float  % above/below 2030 target
-        tertiaire_compliant    : bool
-        carbon_intensity       : float  kgCO₂e/kWh (from input energy mix)
-        savings_potential_pct  : float  % reduction needed to reach target
-
-    Example
-    -------
-    >>> predict_building({
-    ...     "category":        "Enseignement",
-    ...     "subcategory":     "Enseignement primaire - École élémentaire",
-    ...     "compliance_case": "1A",
-    ...     "pct_electricity": 75.0,
-    ...     "pct_gas_network": 25.0,
-    ...     "n_categories":    1,
-    ...     "n_subcategories": 1,
-    ... }, result, artifacts, sector_ref_eui=120.0)
+    Predict EUI, DPE label and Décret Tertiaire compliance for one building.
     """
     vec           = transform_single_building(building, artifacts)
-    predicted_eui = float(result.model.predict(vec)[0])
+    predicted_eui = float(np.expm1(result.model.predict(vec)[0]))
     dpe_label     = assign_dpe_label(predicted_eui)
 
     ref_eui   = sector_ref_eui if sector_ref_eui is not None else predicted_eui
-    gap       = float(compute_tertiaire_gap(predicted_eui, ref_eui, horizon=tertiaire_horizon))
+    gap       = compute_tertiaire_gap(predicted_eui, ref_eui, horizon=tertiaire_horizon)
     compliant = gap <= 0.0
 
-    rate             = TERTIAIRE_TARGETS.get(tertiaire_horizon, 0.40)
-    target_eui       = ref_eui * (1.0 - rate)
-    savings_pct      = max(0.0, round((predicted_eui - target_eui) / predicted_eui * 100, 1))
+    rate        = TERTIAIRE_TARGETS.get(tertiaire_horizon, 0.40)
+    target_eui  = ref_eui * (1.0 - rate)
+    savings_pct = max(0.0, round((predicted_eui - target_eui) / predicted_eui * 100, 1))
 
-    # Carbon intensity from input energy mix (already computed in transform)
-    carbon = building.get("carbon_intensity_kgco2e_kwh",
-                          0.0571 * building.get("pct_electricity", 100) / 100)
+    carbon = building.get(
+        "carbon_intensity_kgco2e_kwh",
+        round(0.0571 * building.get("pct_electricity", 100) / 100, 4)
+    )
 
     return {
-        "predicted_eui":       round(predicted_eui, 1),
-        "dpe_label":           dpe_label,
-        "tertiaire_gap_pct":   gap,
-        "tertiaire_compliant": compliant,
-        "target_eui":          round(target_eui, 1),
-        "savings_potential_pct": savings_pct,
-        "carbon_intensity_kgco2e_kwh": round(carbon, 4),
+        "predicted_eui":              round(predicted_eui, 1),
+        "dpe_label":                  dpe_label,
+        "tertiaire_gap_pct":          gap,
+        "tertiaire_compliant":        compliant,
+        "target_eui":                 round(target_eui, 1),
+        "savings_potential_pct":      savings_pct,
+        "carbon_intensity_kgco2e_kwh": round(float(carbon), 4),
     }
 
 
 def print_summary(result: RegressorResult) -> None:
-    """Print a clean evaluation summary."""
     print("\n" + "="*60)
     print("AXIOM EUI REGRESSOR EVALUATION")
     print("="*60)
-    print(f"\n📊 EUI Regression (kWh/m²/yr)")
+    print(f"\n📊 EUI Regression (kWh/m²/yr)  [y = log1p → expm1]")
     print(f"   R²       : {result.r2:.3f}")
     print(f"   MAE      : {result.mae:.1f} kWh/m²")
     print(f"   RMSE     : {result.rmse:.1f} kWh/m²")
@@ -263,6 +183,6 @@ def print_summary(result: RegressorResult) -> None:
     print(f"   ±1 band  : {result.dpe_adjacent_accuracy:.1%}")
     print(f"\n🔍 Top 10 Feature Importances:")
     print(result.feature_importances.head(10).to_string(index=False))
-    print(f"\n📉 EUI Distribution (predicted vs actual):")
+    print(f"\n📉 EUI (predicted vs actual):")
     print(f"   Actual  — mean: {result.y_test.mean():.1f}  median: {np.median(result.y_test):.1f}")
     print(f"   Predict — mean: {result.y_pred.mean():.1f}  median: {np.median(result.y_pred):.1f}")
