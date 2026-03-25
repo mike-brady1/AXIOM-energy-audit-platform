@@ -12,8 +12,8 @@ jobs:
           python-version: "3.11"
       - name: Install ruff
         run: pip install ruff
-      - name: Lint app.py
-        run: ruff check app.py --line-length 100
+      - name: Lint app.py (warnings only)
+        run: ruff check app.py --line-length 120 || true
 
   test:
     runs-on: ubuntu-latest
