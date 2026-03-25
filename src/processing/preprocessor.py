@@ -3,22 +3,29 @@ AXIOM — Step 2: Feature Matrix Preprocessor
 ============================================
 Transforms cleaned ADEME DataFrames into ML-ready feature matrices.
 
-Key design decision — TARGET ENCODING for sector columns:
-  LabelEncoder assigns arbitrary integers (e.g. school=42, data_centre=43)
-  which the RF treats as numerically adjacent — meaningless splits.
-  Target encoding replaces each category with its MEAN EUI from training data,
-  giving the RF a real continuous signal (school~118, data_centre~1847).
-  This is the primary driver of R² improvement.
+Key design decisions:
+
+1. TARGET ENCODING (leakage-safe):
+   Built from training fold only (via train_test_split before encoding).
+   Replaces LabelEncoder integers with mean EUI per sector — gives the
+   RF a meaningful continuous signal instead of arbitrary ordinals.
+
+2. USAGE PATTERN FEATURES:
+   pct_individual / pct_common / pct_shared explain within-sector variance
+   (e.g. individually-metered buildings vs shared facilities).
+
+3. TEMPORAL FEATURE:
+   year (2016–2023) captures the downward trend from Tertiaire compliance.
 
 Pipeline
 --------
   1. Sector-aware EUI outlier filter
   2. Fill + compute energy mix columns
   3. Derive energy features
-  4. Assign DPE label (A→G)
-  5. EUI tier (Low/Medium/High)
-  6. Décret Tertiaire gap vs sector benchmark
-  7. Target-encode category + subcategory (mean EUI per sector)
+  4. Assign DPE label (A→G) and EUI tier
+  5. Décret Tertiaire gap vs sector benchmark
+  6. Target-encode category + subcategory (training fold mean EUI)
+  7. Add usage pattern + temporal features
   8. One-hot-encode compliance_case
   9. StandardScaler
   10. Return X, y (raw EUI), meta, artifacts
@@ -68,18 +75,22 @@ _EF = {
 }
 _ENERGY_COLS = list(_EF.keys())
 
+# Usage pattern columns present in RATIO dataset
+_USAGE_COLS = ["pct_individual", "pct_common", "pct_shared"]
+
 
 # ───────────────────────────────────────────────────────────────────────────
 @dataclass
 class PreprocessArtifacts:
     """Serialisable objects needed to transform unseen buildings at inference."""
-    scaler:              StandardScaler
-    feature_names:       list[str]
-    # Target encoding maps: category/subcategory → mean EUI
-    category_target_map:    dict = field(default_factory=dict)
-    subcategory_target_map: dict = field(default_factory=dict)
-    global_mean_eui:        float = 155.0   # fallback for unseen sectors
-    # Keep label encoders for backwards compat (not used in features)
+    scaler:                 StandardScaler
+    feature_names:          list[str]
+    category_target_map:    dict  = field(default_factory=dict)
+    subcategory_target_map: dict  = field(default_factory=dict)
+    global_mean_eui:        float = 155.0
+    year_min:               int   = 2016
+    year_max:               int   = 2023
+    # Kept for backwards compat, not used as features
     label_enc_category:     Optional[LabelEncoder] = None
     label_enc_subcategory:  Optional[LabelEncoder] = None
     sector_benchmarks:      Optional[pd.DataFrame] = None
@@ -125,10 +136,10 @@ def _sector_aware_eui_filter(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _ensure_energy_cols(df: pd.DataFrame) -> pd.DataFrame:
-    for col in _ENERGY_COLS:
+    for col in _ENERGY_COLS + _USAGE_COLS:
         if col not in df.columns:
             df[col] = 0.0
-    df[_ENERGY_COLS] = df[_ENERGY_COLS].fillna(0.0)
+    df[_ENERGY_COLS + _USAGE_COLS] = df[_ENERGY_COLS + _USAGE_COLS].fillna(0.0)
     return df
 
 
@@ -148,22 +159,27 @@ def _derive_energy_features(df: pd.DataFrame) -> pd.DataFrame:
         "pct_gas_network", "pct_gas_lng", "pct_gas_propane", "pct_gas_butane",
         "pct_fuel_oil", "pct_coal", "pct_anthracite", "pct_diesel",
     ] if c in df.columns]
-    df["pct_fossil"]    = df[fossil_cols].sum(axis=1).clip(0, 100)
-    renew_cols          = [c for c in ["pct_wood", "pct_heat_network"] if c in df.columns]
-    df["pct_renewable"] = df[renew_cols].sum(axis=1).clip(0, 100)
+    df["pct_fossil"]      = df[fossil_cols].sum(axis=1).clip(0, 100)
+    renew_cols            = [c for c in ["pct_wood", "pct_heat_network"] if c in df.columns]
+    df["pct_renewable"]   = df[renew_cols].sum(axis=1).clip(0, 100)
     df["is_mixed_energy"] = (df[available] > 5.0).sum(axis=1).gt(1).astype(int)
+    # eui_raw vs eui_adjusted ratio: captures climate correction magnitude
+    if "eui_raw" in df.columns:
+        df["eui_correction_ratio"] = (
+            df["eui_adjusted"] / df["eui_raw"].replace(0, np.nan)
+        ).fillna(1.0).clip(0.5, 2.0)
     return df
 
 
 def _build_target_maps(df: pd.DataFrame) -> tuple[dict, dict, float]:
     """
-    Compute mean EUI per category and subcategory from training data.
-    Returns (category_map, subcategory_map, global_mean).
+    Compute mean EUI per category and subcategory.
+    MUST be called only on the training fold to avoid leakage.
     """
     global_mean = float(df["eui_adjusted"].mean())
-    cat_map = df.groupby("category")["eui_adjusted"].mean().to_dict()
-    sub_map = df.groupby("subcategory")["eui_adjusted"].mean().to_dict()
-    logger.info("Target encoding: %d categories, %d subcategories, global_mean=%.1f",
+    cat_map     = df.groupby("category")["eui_adjusted"].mean().to_dict()
+    sub_map     = df.groupby("subcategory")["eui_adjusted"].mean().to_dict()
+    logger.info("Target encoding: %d cats, %d subcats, global_mean=%.1f",
                 len(cat_map), len(sub_map), global_mean)
     return cat_map, sub_map, global_mean
 
@@ -175,11 +191,18 @@ def build_feature_matrix(
     *,
     scale: bool = True,
     tertiaire_horizon: int = 2030,
+    test_size: float = 0.20,
+    random_state: int = 42,
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame, PreprocessArtifacts]:
     """
-    Build ML-ready feature matrix with target encoding for sector columns.
+    Build ML-ready feature matrix with leakage-safe target encoding.
     Returns X, y (raw EUI kWh/m²), meta, artifacts.
+
+    Target maps are built from the training fold only (80% by default)
+    then applied to all rows, preventing test-set leakage.
     """
+    from sklearn.model_selection import train_test_split as _tts
+
     df = df_ratio.copy()
     logger.info("Preprocessor start: %d rows", len(df))
 
@@ -192,9 +215,8 @@ def build_feature_matrix(
     p33 = df["eui_adjusted"].quantile(0.33)
     p66 = df["eui_adjusted"].quantile(0.66)
     df["eui_tier"] = assign_eui_tier(df["eui_adjusted"], p33, p66)
-    logger.info("EUI tiers p33=%.1f p66=%.1f", p33, p66)
 
-    # Sector benchmarks for Tertiaire gap
+    # Sector reference for Tertiaire gap
     if df_activite is not None:
         from src.ingestion.ademe_loader import activite_benchmarks
         bench     = activite_benchmarks(df_activite)
@@ -208,10 +230,20 @@ def build_feature_matrix(
         df["eui_adjusted"], df["sector_ref_eui"], horizon=tertiaire_horizon
     )
 
-    # ✔ TARGET ENCODING: replace arbitrary integers with mean EUI per sector
-    cat_map, sub_map, global_mean = _build_target_maps(df)
+    # ✔ LEAKAGE-SAFE target encoding:
+    #   split index into train/test, build maps only from train rows
+    train_idx, _ = _tts(df.index, test_size=test_size, random_state=random_state)
+    df_train = df.loc[train_idx]
+    cat_map, sub_map, global_mean = _build_target_maps(df_train)
+
     df["category_target_eui"]    = df["category"].map(cat_map).fillna(global_mean)
     df["subcategory_target_eui"] = df["subcategory"].map(sub_map).fillna(global_mean)
+
+    # Year feature (normalised 0–1 across dataset range)
+    year_min = int(df["year"].min()) if "year" in df.columns else 2016
+    year_max = int(df["year"].max()) if "year" in df.columns else 2023
+    year_range = max(year_max - year_min, 1)
+    df["year_norm"] = ((df["year"] - year_min) / year_range).clip(0, 1) if "year" in df.columns else 0.5
 
     # Compliance case dummies
     compliance_dummies = pd.get_dummies(
@@ -220,10 +252,17 @@ def build_feature_matrix(
     df        = pd.concat([df, compliance_dummies], axis=1)
     case_cols = compliance_dummies.columns.tolist()
 
-    # Feature matrix
+    # ✔ Full feature list including usage pattern + temporal
     numeric_features = [
-        "category_target_eui", "subcategory_target_eui",  # ← replaces label codes
+        "category_target_eui", "subcategory_target_eui",
         "n_categories", "n_subcategories",
+        # Usage pattern ← NEW
+        "pct_individual", "pct_common", "pct_shared",
+        # Temporal ← NEW
+        "year_norm",
+        # Climate correction ← NEW
+        "eui_correction_ratio",
+        # Energy mix
         "pct_electricity", "pct_gas_network", "pct_fuel_oil",
         "pct_heat_network", "pct_wood",
         "pct_fossil", "pct_renewable",
@@ -240,7 +279,6 @@ def build_feature_matrix(
     if not scale:
         scaler.fit(X_df.values)
 
-    # Raw EUI as target (no log transform — target encoding handles skew)
     y = df["eui_adjusted"].values
 
     meta = df[[
@@ -256,9 +294,11 @@ def build_feature_matrix(
         category_target_map=cat_map,
         subcategory_target_map=sub_map,
         global_mean_eui=global_mean,
+        year_min=year_min,
+        year_max=year_max,
     )
 
-    logger.info("Preprocessor done: X=%s | features=%s", X.shape, feature_cols)
+    logger.info("Preprocessor done: X=%s features=%s", X.shape, feature_cols)
     return X, y, meta, artifacts
 
 
@@ -272,13 +312,18 @@ def transform_single_building(
     row = _compute_carbon_scope(row)
     row = _derive_energy_features(row)
 
-    # Target encoding — use stored maps, fallback to global mean for unseen sectors
-    cat_val = str(row["category"].iloc[0]) if "category" in row.columns else "Unknown"
+    # Target encoding
+    cat_val = str(row["category"].iloc[0])    if "category"    in row.columns else "Unknown"
     sub_val = str(row["subcategory"].iloc[0]) if "subcategory" in row.columns else "Unknown"
-    row["category_target_eui"]    = artifacts.category_target_map.get(cat_val, artifacts.global_mean_eui)
+    row["category_target_eui"]    = artifacts.category_target_map.get(cat_val,    artifacts.global_mean_eui)
     row["subcategory_target_eui"] = artifacts.subcategory_target_map.get(sub_val, artifacts.global_mean_eui)
 
-    # Compliance case dummies
+    # Year normalisation
+    year_range = max(artifacts.year_max - artifacts.year_min, 1)
+    raw_year   = float(row["year"].iloc[0]) if "year" in row.columns else artifacts.year_max
+    row["year_norm"] = (raw_year - artifacts.year_min) / year_range
+
+    # Fill any remaining missing features
     for fname in artifacts.feature_names:
         if fname not in row.columns:
             row[fname] = 0
