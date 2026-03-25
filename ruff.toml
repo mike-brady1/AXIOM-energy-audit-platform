@@ -1,0 +1,14 @@
+
+[tool.ruff]
+line-length = 120
+exclude = ["notebooks/", "docs/"]
+
+[tool.ruff.lint]
+ignore = [
+    "E501",
+    "F401",
+    "E741",
+    "W605",
+    "E711",
+    "E712",
+]
