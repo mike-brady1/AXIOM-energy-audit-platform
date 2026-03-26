@@ -7,14 +7,19 @@ Key design decisions:
 
 1. TARGET ENCODING (leakage-safe):
    Built from training fold only. Replaces LabelEncoder integers with
-   mean EUI per sector — gives RF a real continuous signal.
+   mean EUI per sector.
 
 2. USAGE PATTERN FEATURES:
    pct_individual / pct_common / pct_shared explain within-sector variance.
 
 3. TEMPORAL FEATURE:
-   year column parsed robustly (handles '2021', '2010-2019' decade ranges)
-   then normalised 0–1 to capture Décret Tertiaire compliance trend.
+   year column parsed robustly (handles '2021', '2010-2019' decade ranges).
+
+4. DPE TERTIAIRE JOIN FEATURES (from df_dpe_tertiaire via sector_stats join):
+   log_surface_median   — log(median floor area) per sector category
+   median_period_ord    — median construction period ordinal (1=pre-1948 → 10=post-2021)
+   pct_pre1975          — % of sector buildings built before 1975 (proxy for renovation need)
+   These must be pre-joined into df_ratio before calling build_feature_matrix.
 
 Pipeline
 --------
@@ -76,6 +81,9 @@ _EF = {
 _ENERGY_COLS = list(_EF.keys())
 _USAGE_COLS  = ["pct_individual", "pct_common", "pct_shared"]
 
+# DPE Tertiaire join features (pre-joined into df_ratio via sector_stats)
+_DPE_JOIN_COLS = ["log_surface_median", "median_period_ord", "pct_pre1975"]
+
 
 # ───────────────────────────────────────────────────────────────────────────
 @dataclass
@@ -87,6 +95,8 @@ class PreprocessArtifacts:
     global_mean_eui:        float = 155.0
     year_min:               float = 2016.0
     year_max:               float = 2023.0
+    # DPE join defaults for inference on unenriched buildings
+    dpe_join_defaults:      dict  = field(default_factory=dict)
     label_enc_category:     Optional[LabelEncoder] = None
     label_enc_subcategory:  Optional[LabelEncoder] = None
     sector_benchmarks:      Optional[pd.DataFrame] = None
@@ -122,10 +132,10 @@ def compute_tertiaire_gap(
 
 def _parse_year_col(series: pd.Series) -> pd.Series:
     """
-    Robustly parse year column which may contain:
-      - Plain integers : 2021
-      - Decade strings : '2010-2019'  → midpoint 2014.5
-      - NaN / unknown  → 2019.0
+    Robustly parse year column:
+      '2021'       → 2021.0
+      '2010-2019'  → 2014.5  (midpoint of decade range)
+      NaN/unknown  → 2019.0
     """
     def _parse(v) -> float:
         try:
@@ -209,6 +219,7 @@ def build_feature_matrix(
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame, PreprocessArtifacts]:
     """
     Build ML-ready feature matrix with leakage-safe target encoding.
+    Pass df_ratio_enriched (with DPE join columns) for best R².
     Returns X, y (raw EUI kWh/m²), meta, artifacts.
     """
     from sklearn.model_selection import train_test_split as _tts
@@ -216,7 +227,6 @@ def build_feature_matrix(
     df = df_ratio.copy()
     logger.info("Preprocessor start: %d rows", len(df))
 
-    # Parse year before filtering (robust to string ranges)
     if "year" in df.columns:
         df["year"] = _parse_year_col(df["year"])
 
@@ -243,7 +253,7 @@ def build_feature_matrix(
         df["eui_adjusted"], df["sector_ref_eui"], horizon=tertiaire_horizon
     )
 
-    # Leakage-safe target encoding
+    # Leakage-safe target encoding (training fold only)
     train_idx, _ = _tts(df.index, test_size=test_size, random_state=random_state)
     cat_map, sub_map, global_mean = _build_target_maps(df.loc[train_idx])
     df["category_target_eui"]    = df["category"].map(cat_map).fillna(global_mean)
@@ -255,6 +265,19 @@ def build_feature_matrix(
     year_range = max(year_max - year_min, 1.0)
     df["year_norm"] = ((df["year"] - year_min) / year_range).clip(0, 1) if "year" in df.columns else 0.5
 
+    # Fill DPE join columns with global medians if not pre-joined
+    dpe_join_defaults = {}
+    for col in _DPE_JOIN_COLS:
+        if col in df.columns:
+            default = float(df[col].median())
+        else:
+            default = 0.0
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default)
+        dpe_join_defaults[col] = default
+    joined = sum(df[c].ne(0).any() for c in _DPE_JOIN_COLS)
+    logger.info("DPE join columns active: %d/%d", joined, len(_DPE_JOIN_COLS))
+
     compliance_dummies = pd.get_dummies(
         df["compliance_case"].fillna("Unknown"), prefix="case", dtype=int
     )
@@ -264,9 +287,17 @@ def build_feature_matrix(
     numeric_features = [
         "category_target_eui", "subcategory_target_eui",
         "n_categories", "n_subcategories",
+        # Usage pattern
         "pct_individual", "pct_common", "pct_shared",
+        # Temporal
         "year_norm",
+        # Climate correction
         "eui_correction_ratio",
+        # DPE Tertiaire join features ← NEW
+        "log_surface_median",    # log(median floor area per sector)
+        "median_period_ord",     # construction era ordinal (1=pre-1948, 10=post-2021)
+        "pct_pre1975",           # % buildings pre-1975 (renovation pressure proxy)
+        # Energy mix
         "pct_electricity", "pct_gas_network", "pct_fuel_oil",
         "pct_heat_network", "pct_wood",
         "pct_fossil", "pct_renewable",
@@ -300,9 +331,10 @@ def build_feature_matrix(
         global_mean_eui=global_mean,
         year_min=year_min,
         year_max=year_max,
+        dpe_join_defaults=dpe_join_defaults,
     )
 
-    logger.info("Done: X=%s", X.shape)
+    logger.info("Done: X=%s features=%s", X.shape, feature_cols)
     return X, y, meta, artifacts
 
 
@@ -324,6 +356,11 @@ def transform_single_building(
     year_range  = max(artifacts.year_max - artifacts.year_min, 1.0)
     raw_year    = _parse_year_col(row["year"]).iloc[0] if "year" in row.columns else artifacts.year_max
     row["year_norm"] = (raw_year - artifacts.year_min) / year_range
+
+    # DPE join features: use stored defaults if not provided
+    for col, default in artifacts.dpe_join_defaults.items():
+        if col not in row.columns:
+            row[col] = default
 
     for fname in artifacts.feature_names:
         if fname not in row.columns:
