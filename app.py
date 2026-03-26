@@ -771,7 +771,7 @@ def audit_one(bname, activity, floor_area, consumption, carrier, client):
     actual = consumption / floor_area
     cf     = CARBON_FACTORS[carrier]
     price  = ENERGY_PRICE[carrier]
-    hdd_data  = fetch_hdd(city if city else "Paris")
+    hdd_data  = fetch_hdd("Paris")
     weather   = weather_normalise(float(consumption),
                                   hdd_data["hdd_actual"],
                                   hdd_data["hdd_standard"])
@@ -871,7 +871,7 @@ def run_audit(city, activity, floor_area, consumption, carrier):
     actual = consumption / floor_area
     cf     = CARBON_FACTORS[carrier]
     price  = ENERGY_PRICE[carrier]
-    hdd_data  = fetch_hdd(city if city else "Paris")
+    hdd_data  = fetch_hdd("Paris")
     weather   = weather_normalise(float(consumption),
                                   hdd_data["hdd_actual"],
                                   hdd_data["hdd_standard"])
@@ -1499,6 +1499,6 @@ Supported formats: **CSV · XLSX · ODS · PDF**  —  One PDF per building + da
 
     gr.Markdown("---\n*AXIOM | ISO 50002:2014 | EU EED 2023/1791 | Powered by Claude AI*")
 
-demo.launch(theme=gr.themes.Soft(),
+demo.launch(server_name="0.0.0.0", server_port=7860, theme=gr.themes.Soft(),
             auth=_check_password if os.environ.get("AXIOM_USER") else None,
             auth_message="Enter your AXIOM credentials to continue.")
