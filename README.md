@@ -8,7 +8,7 @@ sdk_version: "4.44.0"
 app_file: app.py
 pinned: true
 license: mit
-short_description: AI-powered energy auditing — ISO 50002 compliant, EU EED ready
+short_description: AI energy auditing, ISO 50002, EU EED ready
 tags:
   - energy
   - sustainability
