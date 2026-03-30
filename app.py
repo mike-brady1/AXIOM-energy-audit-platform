@@ -1375,7 +1375,7 @@ def run_esco(capex, savings_eur, co2_kg, years, esco_pct, discount, loan_rate):
     except Exception as ex:
         return f"❌ Error: {ex}"
 
-with gr.Blocks(title=ORG_NAME) as demo:
+with gr.Blocks(title=ORG_NAME, theme=gr.themes.Soft()) as demo:
     gr.Markdown("""
 # AXIOM Energy Audit Platform
 ### Automated EU-compliant energy audits powered by Claude AI
@@ -1499,6 +1499,5 @@ Supported formats: **CSV · XLSX · ODS · PDF**  —  One PDF per building + da
 
     gr.Markdown("---\n*AXIOM | ISO 50002:2014 | EU EED 2023/1791 | Powered by Claude AI*")
 
-demo.launch(theme=gr.themes.Soft(),
-            auth=_check_password if os.environ.get("AXIOM_USER") else None,
+demo.launch(auth=_check_password if os.environ.get("AXIOM_USER") else None,
             auth_message="Enter your AXIOM credentials to continue.")
