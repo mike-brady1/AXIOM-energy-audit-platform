@@ -766,12 +766,12 @@ def build_pdf(bname, benchmark_result, ecm_list, narrative,
     doc.build(story)
     return path
 
-def audit_one(bname, activity, floor_area, consumption, carrier, client):
+def audit_one(bname, activity, floor_area, consumption, carrier, client, city="Paris"):
     b      = BENCHMARKS[activity]
     actual = consumption / floor_area
     cf     = CARBON_FACTORS[carrier]
     price  = ENERGY_PRICE[carrier]
-    hdd_data  = fetch_hdd(city if city else "Paris")
+    hdd_data = fetch_hdd(city if city else "Paris")
     weather   = weather_normalise(float(consumption),
                                   hdd_data["hdd_actual"],
                                   hdd_data["hdd_standard"])
@@ -1179,7 +1179,7 @@ def run_batch(uploaded_file):
                 errors.append("**" + bname + "**: unknown carrier '" + carrier + "'")
                 continue
             r = audit_one(bname, activity, int(row["floor_area_m2"]),
-                          int(row["consumption_kwh"]), carrier, client)
+              int(row["consumption_kwh"]), carrier, client, city="Paris")
             results.append(r)
         except Exception as e:
             errors.append("**" + str(row.get("building_name","?")) + "**: " + str(e))
