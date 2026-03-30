@@ -1,3 +1,22 @@
+---
+title: AXIOM Energy Audit
+emoji: ⚡
+colorFrom: blue
+colorTo: green
+sdk: gradio
+sdk_version: "4.44.0"
+app_file: app.py
+pinned: true
+license: mit
+short_description: AI-powered energy auditing — ISO 50002 compliant, EU EED ready
+tags:
+  - energy
+  - sustainability
+  - gradio
+  - climate
+  - iso50002
+---
+
 # AXIOM — Automated Energy Audit Platform
 
 > **AI-powered energy auditing for buildings and portfolios — ISO 50002 compliant, EU EED ready, PDF reports in seconds.**
@@ -19,7 +38,7 @@ No installation required. Open in your browser, upload a CSV or fill in building
 
 ## What Is AXIOM?
 
-AXIOM is a fully automated energy audit platform that replicates and accelerates the work of a qualified energy auditor. It ingests building data, benchmarks performance against sector medians, identifies Energy Conservation Measures (ECMs), models financial and carbon returns, checks regulatory compliance, and generates a professional PDF report — all powered by Claude AI.
+AXIOM is a fully automated energy audit platform. It ingests building data, benchmarks performance against sector medians, identifies ECMs, models financial and carbon returns, checks regulatory compliance, and generates a professional PDF report — all powered by Claude AI.
 
 ### Standards & Compliance Coverage
 
@@ -52,18 +71,13 @@ AXIOM is a fully automated energy audit platform that replicates and accelerates
 
 ### 📦 Batch Portfolio Audit
 - Upload CSV / XLSX / ODS / PDF with multiple buildings
-- Processes entire portfolio in one click
 - Portfolio dashboard: EUI benchmark chart, savings bar chart, tier donut
-- Building summary table with DPE, performance, savings, payback
-- Portfolio PDF with landscape summary table
 - ZIP download with all individual building PDFs
 
 ### 💰 ESCO / Financing Calculator
 - Three financing structures: **ESCO shared savings**, **bank loan**, **self-funded**
 - IRR (Newton-Raphson), NPV at configurable discount rate
-- EU ETS carbon value auto-included in benefit stream
 - 10-year cash flow table with loan balance
-- Smart recommendation engine (IRR / payback decision logic)
 
 ### 🎨 Branding & Auth
 - Password protection via HF Secrets (`AXIOM_USER` / `AXIOM_PASS`)
@@ -74,8 +88,6 @@ AXIOM is a fully automated energy audit platform that replicates and accelerates
 
 ## 🧪 Test Cases
 
-Use these to test the Single Building Audit tab:
-
 | Building | Activity | Area (m²) | Consumption (kWh/yr) | Carrier | Expected DPE |
 |----------|----------|-----------|---------------------|---------|-------------|
 | Office Paris | Bureaux | 5 000 | 875 000 | Electricite | C |
@@ -84,72 +96,35 @@ Use these to test the Single Building Audit tab:
 | Warehouse | Logistique | 20 000 | 600 000 | Fioul | B |
 | Hotel | Hotellerie | 6 000 | 880 000 | Electricite | F |
 
-### Batch CSV Template
-
-```csv
-building_name,activity,floor_area_m2,consumption_kwh,energy_carrier
-Tour Montparnasse,Bureaux,15000,2100000,Electricite
-Lycee Victor Hugo,Enseignement Secondaire,8000,720000,Gaz
-Hotel Mercure Lyon,Hotellerie,6000,950000,Electricite
-Entrepot Rungis,Logistique,25000,800000,Fioul
-Clinique Saint-Louis,Sante - Centres Hospitaliers,12000,3200000,Electricite
-```
-
-### Valid Energy Carriers
-`Electricite` | `Gaz` | `Fioul` | `Reseau de chaleur` | `Reseau de froid` | `Bois`
-
-### Valid Activity Types
-`Bureaux` | `Enseignement Primaire` | `Enseignement Secondaire` | `Enseignement Superieur` | `Sante - Centres Hospitaliers` | `Hotellerie` | `Logistique` | `Commerce` | `Sports` | `Restauration` | `Culturel` | `Judiciaire` | `Penitentiaire` | `Social - Hebergement` | `Autre`
-
 ---
 
 ## 🏗️ Architecture
 
 ```
 axiom-energy-audit-platform/
-├── app.py                  # Main Gradio application (single file, ~1100 lines)
-├── requirements.txt        # Python dependencies
-├── pyproject.toml          # Project metadata
-├── docs/                   # Architecture docs
-├── notebooks/              # Jupyter exploration notebooks
-├── src/                    # Modular source (future refactor)
-└── tests/                  # Test suite
+├── app.py                  # Main Gradio application (~1100 lines)
+├── requirements.txt
+├── pyproject.toml
+├── docs/
+├── notebooks/
+├── src/
+└── tests/
 ```
-
-### Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| **UI** | Gradio 4.x (Soft theme) |
-| **AI** | Anthropic Claude (claude-sonnet-4-5) |
-| **PDF** | ReportLab (platypus) |
-| **Charts** | Matplotlib |
-| **Data** | Pandas, NumPy |
-| **Weather** | Open-Meteo Archive API |
-| **Hosting** | Hugging Face Spaces |
-| **Auth** | HF Secrets + hmac/SHA-256 |
 
 ---
 
-## 🚀 Self-Hosting / Local Setup
+## 🚀 Local Setup
 
 ```bash
-# 1. Clone
 git clone https://github.com/mike-brady1/AXIOM-energy-audit-platform.git
 cd AXIOM-energy-audit-platform
-
-# 2. Install dependencies
 pip install -r requirements.txt
-
-# 3. Set your Anthropic API key
 export ANTHROPIC_API_KEY=sk-ant-...
-
-# 4. Run
 python app.py
 # → Open http://localhost:7860
 ```
 
-### HF Space Secrets (Optional)
+### HF Space Secrets
 
 | Secret | Purpose | Default |
 |--------|---------|--------|
@@ -159,26 +134,6 @@ python app.py
 | `AXIOM_ORG_NAME` | Org name on PDF | AXIOM Energy Audit Platform |
 | `AXIOM_TAGLINE` | PDF footer tagline | Powered by Claude AI \| ISO 50002 |
 | `AXIOM_COLOR` | Accent colour (hex) | #1A3C5E |
-
----
-
-## 📐 Key Formulas
-
-### Carbon-Adjusted Payback
-```
-Adj Payback = CapEx / (EUR savings/yr + (kgCO₂e/yr ÷ 1000) × €65)
-```
-
-### Weather Normalisation (HDD base 18°C)
-```
-Norm kWh = Base Load + Weather Load × (HDD_standard / HDD_actual)
-Where: Base Load = 40% of consumption, Weather Load = 60%
-```
-
-### ESCO NPV
-```
-NPV = Σ(t=1 to N) [ CF_t / (1+r)^t ] - CapEx
-```
 
 ---
 
